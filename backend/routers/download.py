@@ -76,19 +76,28 @@ async def start_download():
     # First, verify state matches disk
     _verify_download_state()
 
-    # Get pending songs
+    # Get pending songs - extract to dicts to avoid detached instance errors
     with get_session() as session:
         songs = session.exec(
             select(Song).where(Song.download_status == "pending")
         ).all()
+        # Extract data before session closes
+        song_data = [
+            {
+                "spotify_id": s.spotify_id,
+                "title": s.title,
+                "artist": s.artist,
+            }
+            for s in songs
+        ]
 
-    if not songs:
+    if not song_data:
         return {"status": "no_pending", "message": "No songs to download"}
 
     # Reset state
     _state["progress"] = {
         "current": 0,
-        "total": len(songs),
+        "total": len(song_data),
         "status": "downloading",
         "current_song": None,
         "success": 0,
@@ -97,39 +106,43 @@ async def start_download():
     _state["active_downloads"] = 0
 
     # Start downloads in background
-    asyncio.create_task(_download_all(songs))
+    asyncio.create_task(_download_all(song_data))
 
-    return {"status": "started", "total": len(songs)}
+    return {"status": "started", "total": len(song_data)}
 
 
-async def _download_all(songs: list[Song]):
+async def _download_all(songs: list[dict]):
     """Download all songs with concurrency limit."""
     tasks = [_download_song(song) for song in songs]
     await asyncio.gather(*tasks)
     _state["progress"]["status"] = "complete"
 
 
-async def _download_song(song: Song):
+async def _download_song(song: dict):
     """Download a single song using yt-dlp."""
+    spotify_id = song["spotify_id"]
+    title = song["title"]
+    artist = song["artist"]
+
     async with _semaphore:
         _state["active_downloads"] += 1
         _state["progress"]["current_song"] = {
-            "spotify_id": song.spotify_id,
-            "title": song.title,
-            "artist": song.artist,
+            "spotify_id": spotify_id,
+            "title": title,
+            "artist": artist,
         }
 
         # Update status to downloading
         with get_session() as session:
-            db_song = session.get(Song, song.spotify_id)
+            db_song = session.get(Song, spotify_id)
             if db_song:
                 db_song.download_status = "downloading"
                 db_song.updated_at = datetime.utcnow()
 
         try:
             # Build search query
-            search_query = f"ytsearch1:{song.artist} - {song.title}"
-            output_path = settings.audio_dir / f"{song.spotify_id}.mp3"
+            search_query = f"ytsearch1:{artist} - {title}"
+            output_path = settings.audio_dir / f"{spotify_id}.mp3"
 
             # Run yt-dlp
             cmd = [
@@ -155,7 +168,7 @@ async def _download_song(song: Song):
             if process.returncode == 0 and output_path.exists():
                 # Success
                 with get_session() as session:
-                    db_song = session.get(Song, song.spotify_id)
+                    db_song = session.get(Song, spotify_id)
                     if db_song:
                         db_song.download_status = "done"
                         db_song.file_path = str(output_path)
@@ -164,7 +177,7 @@ async def _download_song(song: Song):
             else:
                 # Failed
                 with get_session() as session:
-                    db_song = session.get(Song, song.spotify_id)
+                    db_song = session.get(Song, spotify_id)
                     if db_song:
                         db_song.download_status = "failed"
                         db_song.updated_at = datetime.utcnow()
@@ -172,7 +185,7 @@ async def _download_song(song: Song):
 
         except asyncio.TimeoutError:
             with get_session() as session:
-                db_song = session.get(Song, song.spotify_id)
+                db_song = session.get(Song, spotify_id)
                 if db_song:
                     db_song.download_status = "failed"
                     db_song.updated_at = datetime.utcnow()
@@ -180,7 +193,7 @@ async def _download_song(song: Song):
 
         except Exception as e:
             with get_session() as session:
-                db_song = session.get(Song, song.spotify_id)
+                db_song = session.get(Song, spotify_id)
                 if db_song:
                     db_song.download_status = "failed"
                     db_song.updated_at = datetime.utcnow()

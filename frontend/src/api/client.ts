@@ -17,6 +17,20 @@ export interface LibraryResponse {
     };
 }
 
+export interface SearchResult {
+    spotify_id: string;
+    title: string;
+    artist: string;
+    album: string;
+    album_art_url: string;
+    spotify_link: string;
+    similarity_score: number;
+}
+
+export interface SearchResponse {
+    results: SearchResult[];
+}
+
 export const api = {
     getAuthUrl: async (): Promise<string> => {
         const res = await fetch(`${API_BASE}/api/auth/url`);
@@ -50,6 +64,22 @@ export const api = {
     startDownload: async (): Promise<{ status: string; total: number; message?: string }> => {
         const res = await fetch(`${API_BASE}/api/download`, {
             method: 'POST',
+        });
+        return res.json();
+    },
+
+    startEmbed: async (): Promise<{ status: string; total: number; message?: string }> => {
+        const res = await fetch(`${API_BASE}/api/embed`, {
+            method: 'POST',
+        });
+        return res.json();
+    },
+
+    search: async (query: string): Promise<SearchResponse> => {
+        const res = await fetch(`${API_BASE}/api/search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query, n_results: 20 }),
         });
         return res.json();
     },

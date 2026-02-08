@@ -142,6 +142,87 @@ async def _sync_playlist(playlist_id: str):
         _state["progress"]["status"] = f"error: {str(e)}"
 
 
+@router.post("/sync/liked")
+async def start_sync_liked():
+    """Start syncing user's liked songs."""
+    if not _state["access_token"]:
+        raise HTTPException(status_code=401, detail="Not authenticated with Spotify")
+
+    # Reset progress
+    _state["progress"] = {"current": 0, "total": 0, "status": "syncing", "latest_song": None}
+
+    # Start sync in background
+    asyncio.create_task(_sync_liked_songs())
+
+    return {"status": "started", "source": "liked_songs"}
+
+
+async def _sync_liked_songs():
+    """Fetch all liked songs and save to database."""
+    try:
+        sp = spotipy.Spotify(auth=_state["access_token"])
+
+        # Get total count first
+        initial = sp.current_user_saved_tracks(limit=1)
+        total = initial["total"]
+        _state["progress"]["total"] = total
+
+        # Paginate through liked songs
+        offset = 0
+        limit = 50
+        synced_count = 0
+
+        while offset < total:
+            results = sp.current_user_saved_tracks(offset=offset, limit=limit)
+
+            with get_session() as session:
+                for item in results["items"]:
+                    track = item["track"]
+                    if not track or not track["id"]:  # Skip local files
+                        continue
+
+                    # Check if song already exists
+                    existing = session.get(Song, track["id"])
+                    if existing:
+                        synced_count += 1
+                        _state["progress"]["current"] = synced_count
+                        continue
+
+                    # Get album art (largest available)
+                    album_art_url = ""
+                    if track["album"]["images"]:
+                        album_art_url = track["album"]["images"][0]["url"]
+
+                    # Parse added_at timestamp
+                    added_at = datetime.fromisoformat(item["added_at"].replace("Z", "+00:00"))
+
+                    # Create new song record
+                    song = Song(
+                        spotify_id=track["id"],
+                        title=track["name"],
+                        artist=", ".join(a["name"] for a in track["artists"]),
+                        album=track["album"]["name"],
+                        uri=track["uri"],
+                        added_at=added_at,
+                        album_art_url=album_art_url,
+                        spotify_link=f"https://open.spotify.com/track/{track['id']}",
+                    )
+
+                    session.add(song)
+                    synced_count += 1
+
+                    _state["progress"]["current"] = synced_count
+                    _state["progress"]["latest_song"] = {"title": song.title, "artist": song.artist}
+
+            offset += limit
+            await asyncio.sleep(0.1)  # Small delay to avoid rate limits
+
+        _state["progress"]["status"] = "complete"
+
+    except Exception as e:
+        _state["progress"]["status"] = f"error: {str(e)}"
+
+
 @router.get("/sync/stream")
 async def sync_stream():
     """SSE stream for sync progress."""

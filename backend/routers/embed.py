@@ -47,7 +47,7 @@ def _load_model():
     try:
         import laion_clap
         print("Loading CLAP model...")
-        model = laion_clap.CLAP_Module(enable_fusion=False, amodel='HTSAT-base')
+        model = laion_clap.CLAP_Module(enable_fusion=False)
         model.load_ckpt()  # Downloads checkpoint if needed (~600MB)
         _state["model"] = model
         print("CLAP model loaded successfully")
@@ -65,7 +65,7 @@ async def start_embed():
         if not _load_model():
             raise HTTPException(status_code=503, detail="Failed to load CLAP model")
 
-    # Get songs ready for embedding
+    # Get songs ready for embedding - extract to dicts to avoid DetachedInstanceError
     with get_session() as session:
         songs = session.exec(
             select(Song).where(
@@ -73,38 +73,52 @@ async def start_embed():
                 Song.embed_status == "pending"
             )
         ).all()
+        # Extract data before session closes
+        song_data = [
+            {
+                "spotify_id": s.spotify_id,
+                "title": s.title,
+                "artist": s.artist,
+                "album": s.album,
+                "album_art_url": s.album_art_url,
+                "spotify_link": s.spotify_link,
+                "file_path": s.file_path,
+            }
+            for s in songs
+        ]
 
-    if not songs:
+    if not song_data:
         return {"status": "no_pending", "message": "No songs to embed"}
 
     # Reset state
     _state["progress"] = {
         "current": 0,
-        "total": len(songs),
+        "total": len(song_data),
         "status": "embedding",
         "current_song": None,
     }
 
     # Start embedding in background
-    asyncio.create_task(_embed_all(songs))
+    asyncio.create_task(_embed_all(song_data))
 
     return {"status": "started", "total": len(songs)}
 
 
-async def _embed_all(songs: list[Song]):
+async def _embed_all(songs: list[dict]):
     """Embed all songs sequentially (GPU is the bottleneck)."""
     loop = asyncio.get_event_loop()
 
     for song in songs:
+        spotify_id = song["spotify_id"]
         _state["progress"]["current_song"] = {
-            "spotify_id": song.spotify_id,
-            "title": song.title,
-            "artist": song.artist,
+            "spotify_id": spotify_id,
+            "title": song["title"],
+            "artist": song["artist"],
         }
 
         # Update status to processing
         with get_session() as session:
-            db_song = session.get(Song, song.spotify_id)
+            db_song = session.get(Song, spotify_id)
             if db_song:
                 db_song.embed_status = "processing"
                 db_song.updated_at = datetime.utcnow()
@@ -114,39 +128,40 @@ async def _embed_all(songs: list[Song]):
             embedding = await loop.run_in_executor(
                 _executor,
                 _generate_embedding,
-                song.file_path
+                song["file_path"]
             )
 
             if embedding is not None:
                 # Store in ChromaDB
                 collection.upsert(
-                    ids=[song.spotify_id],
+                    ids=[spotify_id],
                     embeddings=[embedding],
                     metadatas=[{
-                        "title": song.title,
-                        "artist": song.artist,
-                        "album": song.album,
-                        "album_art_url": song.album_art_url,
-                        "spotify_link": song.spotify_link,
+                        "title": song["title"],
+                        "artist": song["artist"],
+                        "album": song["album"],
+                        "album_art_url": song["album_art_url"],
+                        "spotify_link": song["spotify_link"],
                     }]
                 )
 
                 # Update SQLite
                 with get_session() as session:
-                    db_song = session.get(Song, song.spotify_id)
+                    db_song = session.get(Song, spotify_id)
                     if db_song:
                         db_song.embed_status = "stored"
                         db_song.updated_at = datetime.utcnow()
             else:
                 with get_session() as session:
-                    db_song = session.get(Song, song.spotify_id)
+                    db_song = session.get(Song, spotify_id)
                     if db_song:
                         db_song.embed_status = "failed"
                         db_song.updated_at = datetime.utcnow()
 
         except Exception as e:
+            print(f"Embed error for {spotify_id}: {e}")
             with get_session() as session:
-                db_song = session.get(Song, song.spotify_id)
+                db_song = session.get(Song, spotify_id)
                 if db_song:
                     db_song.embed_status = "failed"
                     db_song.updated_at = datetime.utcnow()
