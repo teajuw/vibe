@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+sse-starlette
+pydantic-settings
+sqlmodel
+spotipy
+yt-dlp
+laion-clap
+chromadb
+numpy
+python-dotenv
