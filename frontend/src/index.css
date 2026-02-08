@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #1DB954; /* Spotify Green */
+  --color-background: #111111;
+}
+
+body {
+  background-color: var(--color-background);
+  color: white;
+}

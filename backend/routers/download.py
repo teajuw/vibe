@@ -31,9 +31,51 @@ _state = {
 _semaphore = asyncio.Semaphore(settings.max_concurrent_downloads)
 
 
+def _verify_download_state():
+    """Sync database state with actual files on disk."""
+    fixed = {"marked_done": 0, "marked_pending": 0}
+
+    with get_session() as session:
+        songs = session.exec(select(Song)).all()
+
+        for song in songs:
+            file_path = settings.audio_dir / f"{song.spotify_id}.mp3"
+            file_exists = file_path.exists()
+
+            # File exists but status isn't done → mark as done
+            if file_exists and song.download_status != "done":
+                db_song = session.get(Song, song.spotify_id)
+                if db_song:
+                    db_song.download_status = "done"
+                    db_song.file_path = str(file_path)
+                    db_song.updated_at = datetime.utcnow()
+                    fixed["marked_done"] += 1
+
+            # File missing but status is done → mark as pending for re-download
+            elif not file_exists and song.download_status == "done":
+                db_song = session.get(Song, song.spotify_id)
+                if db_song:
+                    db_song.download_status = "pending"
+                    db_song.file_path = None
+                    db_song.updated_at = datetime.utcnow()
+                    fixed["marked_pending"] += 1
+
+    return fixed
+
+
+@router.post("/download/verify")
+async def verify_downloads():
+    """Verify download state matches files on disk."""
+    fixed = _verify_download_state()
+    return {"status": "verified", "fixed": fixed}
+
+
 @router.post("/download")
 async def start_download():
     """Start downloading audio for all pending songs."""
+    # First, verify state matches disk
+    _verify_download_state()
+
     # Get pending songs
     with get_session() as session:
         songs = session.exec(
